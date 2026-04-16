@@ -1,5 +1,5 @@
 ############################
-# TERRAFORM BACKEND (S3)
+# BACKEND
 ############################
 terraform {
   backend "s3" {
@@ -24,7 +24,7 @@ variable "app_port" {
 }
 
 ############################
-# DATA SOURCES
+# AZs
 ############################
 data "aws_availability_zones" "available" {}
 
@@ -49,15 +49,41 @@ resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index)
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
+  availability_zone      = element(data.aws_availability_zones.available.names, count.index)
   map_public_ip_on_launch = true
 }
 
+############################
+# PRIVATE SUBNETS
+############################
+resource "aws_subnet" "private" {
+  count                   = 2
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index + 10)
+  availability_zone      = element(data.aws_availability_zones.available.names, count.index + 2)
+  map_public_ip_on_launch = false
+}
+
+############################
+# NAT GATEWAY (IMPORTANT)
+############################
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+}
+
+############################
+# ROUTE TABLES
+############################
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main.id
 }
 
-resource "aws_route" "internet" {
+resource "aws_route" "public_route" {
   route_table_id         = aws_route_table.public_rt.id
   destination_cidr_block = "0.0.0.0/0"
   gateway_id             = aws_internet_gateway.igw.id
@@ -69,15 +95,20 @@ resource "aws_route_table_association" "public_assoc" {
   route_table_id = aws_route_table.public_rt.id
 }
 
-############################
-# PRIVATE SUBNETS
-############################
-resource "aws_subnet" "private" {
-  count                  = 2
-  vpc_id                 = aws_vpc.main.id
-  cidr_block             = cidrsubnet("10.0.0.0/16", 8, count.index + 10)
-  availability_zone      = element(data.aws_availability_zones.available.names, count.index + 2)
-  map_public_ip_on_launch = false
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.main.id
+}
+
+resource "aws_route" "private_route" {
+  route_table_id         = aws_route_table.private_rt.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.nat.id
+}
+
+resource "aws_route_table_association" "private_assoc" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private_rt.id
 }
 
 ############################
@@ -187,7 +218,7 @@ resource "aws_iam_role" "ecs_task_role" {
 }
 
 ############################
-# CLOUDWATCH
+# CLOUDWATCH LOGS
 ############################
 resource "aws_cloudwatch_log_group" "ecs_logs" {
   name = "/ecs/mycal-app"
@@ -218,11 +249,9 @@ resource "aws_ecs_task_definition" "task" {
       name  = "mycal-container"
       image = "957948932374.dkr.ecr.ap-south-1.amazonaws.com/raghu282/mycal-aviz:latest"
 
-      portMappings = [
-        {
-          containerPort = var.app_port
-        }
-      ]
+      portMappings = [{
+        containerPort = var.app_port
+      }]
 
       essential = true
 
@@ -249,7 +278,7 @@ resource "aws_ecs_service" "service" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.private[*].id   # ✅ CORRECT
     security_groups  = [aws_security_group.ecs_sg.id]
     assign_public_ip = false
   }
@@ -275,26 +304,31 @@ resource "aws_appautoscaling_target" "ecs" {
 }
 
 ############################
-# VPC ENDPOINTS (ECR + Logs)
+# VPC ENDPOINTS
 ############################
 resource "aws_vpc_endpoint" "ecr_api" {
-  vpc_id             = aws_vpc.main.id
-  service_name       = "com.amazonaws.ap-south-1.ecr.api"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = aws_subnet.private[*].id
-  security_group_ids = [aws_security_group.ecs_sg.id]
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.ap-south-1.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.ecs_sg.id]
+  private_dns_enabled = true
 }
 
 resource "aws_vpc_endpoint" "ecr_dkr" {
-  vpc_id             = aws_vpc.main.id
-  service_name       = "com.amazonaws.ap-south-1.ecr.dkr"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = aws_subnet.private[*].id
-  security_group_ids = [aws_security_group.ecs_sg.id]
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.ap-south-1.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.ecs_sg.id]
+  private_dns_enabled = true
 }
 
 resource "aws_vpc_endpoint" "logs" {
-  vpc_id             = aws_vpc.main.id
-  service_name       = "com.amazonaws.ap-south-1.logs"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = aws_subnet.private[*].id
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.ap-south-1.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id   # ✅ CONFIRMED
+  security_group_ids  = [aws_security_group.ecs_sg.id]
+  private_dns_enabled = true
+}
