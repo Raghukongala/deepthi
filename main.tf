@@ -28,6 +28,10 @@ variable "app_port" {
 ############################
 data "aws_availability_zones" "available" {}
 
+locals {
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
+}
+
 ############################
 # VPC
 ############################
@@ -38,36 +42,36 @@ resource "aws_vpc" "main" {
 }
 
 ############################
-# INTERNET GATEWAY
+# INTERNET GATEWAY (ONLY FOR PUBLIC SUBNET / ALB)
 ############################
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
 }
 
 ############################
-# PUBLIC SUBNETS
+# PUBLIC SUBNETS (FOR ALB ONLY)
 ############################
 resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index)
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
+  availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = true
 }
 
 ############################
-# PRIVATE SUBNETS
+# PRIVATE SUBNETS (ECS ONLY)
 ############################
 resource "aws_subnet" "private" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index + 10)
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index + 2)
+  availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = false
 }
 
 ############################
-# ROUTE TABLES (PUBLIC)
+# PUBLIC ROUTE TABLE
 ############################
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main.id
@@ -86,25 +90,10 @@ resource "aws_route_table_association" "public_assoc" {
 }
 
 ############################
-# ROUTE TABLES (PRIVATE - FIXED USING NAT)
+# PRIVATE ROUTE TABLE (NO INTERNET ROUTE)
 ############################
-resource "aws_eip" "nat" {
-  domain = "vpc"
-}
-
-resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-}
-
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
-}
-
-resource "aws_route" "private_route" {
-  route_table_id         = aws_route_table.private_rt.id
-  destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.nat.id
 }
 
 resource "aws_route_table_association" "private_assoc" {
@@ -144,10 +133,11 @@ resource "aws_security_group" "ecs_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
+  # IMPORTANT: allow HTTPS for VPC endpoints
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -260,7 +250,7 @@ resource "aws_ecs_task_definition" "task" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = "/ecs/mycal-app"
+          awslogs-group         = aws_cloudwatch_log_group.ecs_logs.name
           awslogs-region        = "ap-south-1"
           awslogs-stream-prefix = "ecs"
         }
@@ -295,19 +285,10 @@ resource "aws_ecs_service" "service" {
 }
 
 ############################
-# AUTO SCALING
+# VPC ENDPOINTS (NO NAT)
 ############################
-resource "aws_appautoscaling_target" "ecs" {
-  service_namespace  = "ecs"
-  resource_id        = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.service.name}"
-  scalable_dimension = "ecs:service:DesiredCount"
-  min_capacity       = 1
-  max_capacity       = 5
-}
 
-############################
-# VPC ENDPOINTS
-############################
+# ECR API
 resource "aws_vpc_endpoint" "ecr_api" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.ecr.api"
@@ -317,6 +298,7 @@ resource "aws_vpc_endpoint" "ecr_api" {
   private_dns_enabled = true
 }
 
+# ECR DKR
 resource "aws_vpc_endpoint" "ecr_dkr" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.ecr.dkr"
@@ -326,9 +308,29 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
   private_dns_enabled = true
 }
 
+# CLOUDWATCH LOGS
 resource "aws_vpc_endpoint" "logs" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.ecs_sg.id]
+  private_dns_enabled = true
+}
+
+# S3 (VERY IMPORTANT FOR ECR LAYERS)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.ap-south-1.s3"
+  vpc_endpoint_type = "Gateway"
+
+  route_table_ids = [aws_route_table.private_rt.id]
+}
+
+# STS (recommended)
+resource "aws_vpc_endpoint" "sts" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.ap-south-1.sts"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
   security_group_ids  = [aws_security_group.ecs_sg.id]
