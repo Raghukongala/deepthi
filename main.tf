@@ -298,4 +298,3 @@ resource "aws_vpc_endpoint" "logs" {
   service_name       = "com.amazonaws.ap-south-1.logs"
   vpc_endpoint_type  = "Interface"
   subnet_ids         = aws_subnet.private[*].id
-  security_group_ids
