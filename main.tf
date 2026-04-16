@@ -24,12 +24,10 @@ variable "app_port" {
 }
 
 ############################
-# AZs
+# FIXED AZ CONTROL (IMPORTANT)
 ############################
-data "aws_availability_zones" "available" {}
-
 locals {
-  azs = slice(data.aws_availability_zones.available.names, 0, 2)
+  azs = ["ap-south-1a", "ap-south-1b"]
 }
 
 ############################
@@ -42,14 +40,14 @@ resource "aws_vpc" "main" {
 }
 
 ############################
-# INTERNET GATEWAY (ONLY FOR PUBLIC SUBNET / ALB)
+# INTERNET GATEWAY (ONLY FOR ALB)
 ############################
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
 }
 
 ############################
-# PUBLIC SUBNETS (FOR ALB ONLY)
+# PUBLIC SUBNETS (ALB ONLY)
 ############################
 resource "aws_subnet" "public" {
   count                   = 2
@@ -90,7 +88,7 @@ resource "aws_route_table_association" "public_assoc" {
 }
 
 ############################
-# PRIVATE ROUTE TABLE (NO INTERNET ROUTE)
+# PRIVATE ROUTE TABLE (NO NAT)
 ############################
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
@@ -133,7 +131,6 @@ resource "aws_security_group" "ecs_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
-  # IMPORTANT: allow HTTPS for VPC endpoints
   egress {
     from_port   = 443
     to_port     = 443
@@ -176,7 +173,7 @@ resource "aws_lb_listener" "listener" {
 }
 
 ############################
-# IAM ROLES
+# IAM
 ############################
 resource "aws_iam_role" "ecs_execution_role" {
   name = "ecsExecutionRole"
@@ -260,7 +257,7 @@ resource "aws_ecs_task_definition" "task" {
 }
 
 ############################
-# ECS SERVICE
+# ECS SERVICE (FIXED AZ MATCH)
 ############################
 resource "aws_ecs_service" "service" {
   name            = "ecs-service"
@@ -288,7 +285,6 @@ resource "aws_ecs_service" "service" {
 # VPC ENDPOINTS (NO NAT)
 ############################
 
-# ECR API
 resource "aws_vpc_endpoint" "ecr_api" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.ecr.api"
@@ -298,7 +294,6 @@ resource "aws_vpc_endpoint" "ecr_api" {
   private_dns_enabled = true
 }
 
-# ECR DKR
 resource "aws_vpc_endpoint" "ecr_dkr" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.ecr.dkr"
@@ -308,7 +303,6 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
   private_dns_enabled = true
 }
 
-# CLOUDWATCH LOGS
 resource "aws_vpc_endpoint" "logs" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.logs"
@@ -318,16 +312,13 @@ resource "aws_vpc_endpoint" "logs" {
   private_dns_enabled = true
 }
 
-# S3 (VERY IMPORTANT FOR ECR LAYERS)
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.ap-south-1.s3"
   vpc_endpoint_type = "Gateway"
-
-  route_table_ids = [aws_route_table.private_rt.id]
+  route_table_ids   = [aws_route_table.private_rt.id]
 }
 
-# STS (recommended)
 resource "aws_vpc_endpoint" "sts" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.ap-south-1.sts"
