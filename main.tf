@@ -24,7 +24,7 @@ variable "app_port" {
 }
 
 ############################
-# FIXED AZ CONTROL (IMPORTANT)
+# AZs
 ############################
 locals {
   azs = ["ap-south-1a", "ap-south-1b"]
@@ -40,14 +40,14 @@ resource "aws_vpc" "main" {
 }
 
 ############################
-# INTERNET GATEWAY (ONLY FOR ALB)
+# IGW
 ############################
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
 }
 
 ############################
-# PUBLIC SUBNETS (ALB ONLY)
+# PUBLIC SUBNETS
 ############################
 resource "aws_subnet" "public" {
   count                   = 2
@@ -58,7 +58,7 @@ resource "aws_subnet" "public" {
 }
 
 ############################
-# PRIVATE SUBNETS (ECS ONLY)
+# PRIVATE SUBNETS
 ############################
 resource "aws_subnet" "private" {
   count                   = 2
@@ -69,7 +69,7 @@ resource "aws_subnet" "private" {
 }
 
 ############################
-# PUBLIC ROUTE TABLE
+# ROUTE TABLES
 ############################
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main.id
@@ -87,9 +87,6 @@ resource "aws_route_table_association" "public_assoc" {
   route_table_id = aws_route_table.public_rt.id
 }
 
-############################
-# PRIVATE ROUTE TABLE (NO NAT)
-############################
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
 }
@@ -103,6 +100,8 @@ resource "aws_route_table_association" "private_assoc" {
 ############################
 # SECURITY GROUPS
 ############################
+
+# ALB SG
 resource "aws_security_group" "alb_sg" {
   vpc_id = aws_vpc.main.id
 
@@ -121,6 +120,7 @@ resource "aws_security_group" "alb_sg" {
   }
 }
 
+# ECS SG
 resource "aws_security_group" "ecs_sg" {
   vpc_id = aws_vpc.main.id
 
@@ -131,10 +131,32 @@ resource "aws_security_group" "ecs_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
+  # FIX: allow full outbound (required for ECR/CloudWatch/STS)
   egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+############################
+# VPC ENDPOINT SECURITY GROUP (NEW FIX)
+############################
+resource "aws_security_group" "vpce_sg" {
+  vpc_id = aws_vpc.main.id
+
+  ingress {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -157,7 +179,12 @@ resource "aws_lb_target_group" "tg" {
   target_type = "ip"
 
   health_check {
-    path = "/"
+    path                = "/"
+    port                = "traffic-port"
+    matcher             = "200"
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
   }
 }
 
@@ -257,7 +284,7 @@ resource "aws_ecs_task_definition" "task" {
 }
 
 ############################
-# ECS SERVICE (FIXED AZ MATCH)
+# ECS SERVICE
 ############################
 resource "aws_ecs_service" "service" {
   name            = "ecs-service"
@@ -282,7 +309,7 @@ resource "aws_ecs_service" "service" {
 }
 
 ############################
-# VPC ENDPOINTS (NO NAT)
+# VPC ENDPOINTS
 ############################
 
 resource "aws_vpc_endpoint" "ecr_api" {
@@ -290,7 +317,7 @@ resource "aws_vpc_endpoint" "ecr_api" {
   service_name        = "com.amazonaws.ap-south-1.ecr.api"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.ecs_sg.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
   private_dns_enabled = true
 }
 
@@ -299,7 +326,7 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
   service_name        = "com.amazonaws.ap-south-1.ecr.dkr"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.ecs_sg.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
   private_dns_enabled = true
 }
 
@@ -308,7 +335,16 @@ resource "aws_vpc_endpoint" "logs" {
   service_name        = "com.amazonaws.ap-south-1.logs"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.ecs_sg.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
+  private_dns_enabled = true
+}
+
+resource "aws_vpc_endpoint" "sts" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.ap-south-1.sts"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpce_sg.id]
   private_dns_enabled = true
 }
 
@@ -317,13 +353,4 @@ resource "aws_vpc_endpoint" "s3" {
   service_name      = "com.amazonaws.ap-south-1.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private_rt.id]
-}
-
-resource "aws_vpc_endpoint" "sts" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.ap-south-1.sts"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.ecs_sg.id]
-  private_dns_enabled = true
 }
