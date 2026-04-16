@@ -24,6 +24,11 @@ variable "app_port" {
 }
 
 ############################
+# DATA SOURCES
+############################
+data "aws_availability_zones" "available" {}
+
+############################
 # VPC
 ############################
 resource "aws_vpc" "main" {
@@ -44,6 +49,7 @@ resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index)
+  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
   map_public_ip_on_launch = true
 }
 
@@ -70,6 +76,7 @@ resource "aws_subnet" "private" {
   count                  = 2
   vpc_id                 = aws_vpc.main.id
   cidr_block             = cidrsubnet("10.0.0.0/16", 8, count.index + 10)
+  availability_zone      = element(data.aws_availability_zones.available.names, count.index + 2)
   map_public_ip_on_launch = false
 }
 
@@ -265,4 +272,12 @@ resource "aws_appautoscaling_target" "ecs" {
   scalable_dimension = "ecs:service:DesiredCount"
   min_capacity       = 1
   max_capacity       = 5
+}
+
+############################
+# OUTPUTS
+############################
+output "alb_dns_name" {
+  description = "DNS name of the Application Load Balancer"
+  value       = aws_lb.alb.dns_name
 }
